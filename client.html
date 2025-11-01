@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Go Video Chat</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background: #2c2c2c;
+            color: white;
+            padding: 20px;
+        }
+        h1, h2 {
+            text-align: center;
+        }
+        #video-container {
+            display: flex;
+            justify-content: center;
+            gap: 20px;
+            flex-wrap: wrap;
+        }
+        video {
+            width: 45%;
+            min-width: 300px;
+            max-width: 600px;
+            border: 2px solid #555;
+            background: #000;
+            border-radius: 8px;
+        }
+        #controls {
+            text-align: center;
+            margin-top: 20px;
+        }
+        button {
+            padding: 10px 20px;
+            font-size: 16px;
+            cursor: pointer;
+            border: none;
+            border-radius: 5px;
+            background: #0a84ff;
+            color: white;
+        }
+        button:disabled {
+            background: #555;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>Go Video Chat 🚀</h1>
+    <h2>Room: <span id="room-name"></span></h2>
+
+    <div id="video-container">
+        <video id="localVideo" autoplay muted playsinline></video>
+        <video id="remoteVideo" autoplay playsinline></video>
+    </div>
+
+    <div id="controls">
+        <button id="joinButton">Join Room</button>
+    </div>
+
+    <script>
+        // ##################################################################
+        // ## 1. CONFIGURATION
+        // ##################################################################
+        
+        // !! IMPORTANT !!
+        // !! Replace this with your *own* Render server URL
+        const SIGNALING_SERVER_URL = "wss://my-video-app.onrender.com/ws";
+
+        // This is a free Google STUN server.
+        // A STUN server is needed to help your two PCs discover their
+        // public IP addresses, even if they are behind a router (NAT).
+        // This is essential for a peer-to-peer connection to work.
+        const STUN_SERVER = "stun:stun.l.google.com:19302";
+
+        // ##################################################################
+        // ## 2. GLOBAL VARIABLES
+        // ##################################################################
+        
+        let ws; // The WebSocket connection
+        let pc; // The RTCPeerConnection (the video connection)
+        let localStream; // The user's local webcam stream
+
+        // Get references to the HTML elements
+        const joinButton = document.getElementById("joinButton");
+        const localVideo = document.getElementById("localVideo");
+        const remoteVideo = document.getElementById("remoteVideo");
+        const roomNameSpan = document.getElementById("room-name");
+
+        // ##################################################################
+        // ## 3. MAIN "JOIN" LOGIC
+        // ##################################################################
+        
+        joinButton.onclick = async () => {
+            try {
+                // 1. Get the room name from the URL (e.g., index.html?room=my-room)
+                const room = new URLSearchParams(window.location.search).get("room");
+                if (!room) {
+                    alert("You must specify a room name in the URL, e.g., ?room=my-room");
+                    return;
+                }
+                roomNameSpan.textContent = room;
+
+                // 2. Get webcam and audio from the user
+                localStream = await navigator.mediaDevices.getUserMedia({
+                    video: true,
+                    audio: true, // Set to true to include audio
+                });
+                
+                // 3. Display the local video stream in the <video> element
+                localVideo.srcObject = localStream;
+                
+                // 4. Initialize the WebSocket and Peer Connection
+                initializeWebSocket(room);
+                initializePeerConnection();
+
+                // 5. Add the local tracks to the peer connection
+                // This tells WebRTC what data to send to the other peer.
+                localStream.getTracks().forEach(track => {
+                    pc.addTrack(track, localStream);
+                });
+
+                joinButton.disabled = true;
+
+            } catch (err) {
+                console.error("Error joining room:", err);
+                alert("Error joining room: " + err.message);
+            }
+        };
+
+        // ##################################################################
+        // ## 4. WEBSOCKET SIGNALING
+        // ##################################################################
+        
+        function initializeWebSocket(room) {
+            const url = `${SIGNALING_SERVER_URL}?room=${room}`;
+            ws = new WebSocket(url);
+
+            ws.onopen = () => {
+                console.log("Connected to signaling server!");
+            };
+
+            // This is the main message handler
+            ws.onmessage = (event) => {
+                const msg = JSON.parse(event.data);
+
+                // We route the message based on its 'type'
+                switch (msg.type) {
+                    case "offer":
+                        handleOffer(msg.payload);
+                        break;
+                    case "answer":
+                        handleAnswer(msg.payload);
+                        break;
+                    case "candidate":
+                        handleCandidate(msg.payload);
+                        break;
+                    default:
+                        console.warn("Unknown message type:", msg.type);
+                }
+            };
+
+            ws.onclose = () => {
+                console.log("WebSocket connection closed.");
+                pc?.close(); // Close the peer connection if the socket closes
+                joinButton.disabled = false;
+            };
+
+            ws.onerror = (err) => {
+                console.error("WebSocket error:", err);
+            };
+        }
+
+        // ##################################################################
+        // ## 5. WEBRTC LOGIC
+        // ##################################################################
+        
+        function initializePeerConnection() {
+            // Create the RTCPeerConnection
+            pc = new RTCPeerConnection({
+                iceServers: [{ urls: STUN_SERVER }]
+            });
+
+            // This event fires when a new ICE candidate is found
+            pc.onicecandidate = (event) => {
+                if (event.candidate && ws.readyState === WebSocket.OPEN) {
+                    // Send the candidate to the other peer via the signaling server
+                    ws.send(JSON.stringify({
+                        type: "candidate",
+                        payload: event.candidate,
+                    }));
+                }
+            };
+
+            // This event fires when the *other* user adds their video/audio stream
+            pc.ontrack = (event) => {
+                console.log("Received remote track!");
+                // event.streams[0] contains the remote video and audio
+                remoteVideo.srcObject = event.streams[0];
+            };
+
+            // This event fires when we need to create a new offer.
+            // It's triggered automatically when pc.addTrack() is called.
+            pc.onnegotiationneeded = async () => {
+                try {
+                    console.log("Creating offer...");
+                    const offer = await pc.createOffer();
+                    await pc.setLocalDescription(offer);
+
+                    // Send the offer to the other peer
+                    if (ws.readyState === WebSocket.OPEN) {
+                        ws.send(JSON.stringify({
+                            type: "offer",
+                            payload: pc.localDescription,
+                        }));
+                    }
+                } catch (err) {
+                    console.error("Error creating offer:", err);
+                }
+            };
+        }
+
+        // ##################################################################
+        // ## 6. WEBRTC SIGNALING HANDLERS
+        // ##################################################################
+        
+        // Called when we receive an 'offer' from the other peer
+        async function handleOffer(offer) {
+            try {
+                console.log("Received offer, creating answer...");
+                // Set the other peer's offer as the remote description
+                await pc.setRemoteDescription(new RTCSessionDescription(offer));
+                
+                // Create an 'answer'
+                const answer = await pc.createAnswer();
+                await pc.setLocalDescription(answer);
+
+                // Send the 'answer' back to the other peer
+                ws.send(JSON.stringify({
+                    type: "answer",
+                    payload: pc.localDescription,
+                }));
+            } catch (err) {
+                console.error("Error handling offer:", err);
+            }
+        }
+
+        // Called when we receive an 'answer' from the other peer
+        async function handleAnswer(answer) {
+            try {
+                console.log("Received answer.");
+                // Set the other peer's answer as the remote description
+                await pc.setRemoteDescription(new RTCSessionDescription(answer));
+            } catch (err) {
+                console.error("Error handling answer:", err);
+            }
+        }
+
+        // Called when we receive an 'candidate' from the other peer
+        async function handleCandidate(candidate) {
+            try {
+                // Add the remote ICE candidate to our peer connection
+                await pc.addIceCandidate(new RTCIceCandidate(candidate));
+            } catch (err) {
+                console.error("Error handling candidate:", err);
+            }
+        }
+
+    </script>
+</body>
+</html>
+
+
