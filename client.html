@@ -51,7 +51,7 @@
 
     <div id="video-container">
         <video id="localVideo" autoplay muted playsinline></video>
-        <video id="remoteVideo" autoplay playsinline></video>
+        <video id="remoteVideo" autoplay playsinline muted></video>
     </div>
 
     <div id="controls">
@@ -65,7 +65,7 @@
         
         // !! IMPORTANT !!
         // !! Replace this with your *own* Render server URL
-        const SIGNALING_SERVER_URL = "wss://my-video-app.onrender.com/ws";
+        const SIGNALING_SERVER_URL = "wss://gostream-agw9.onrender.com/ws";
 
         // This is a free Google STUN server.
         // A STUN server is needed to help your two PCs discover their
@@ -112,13 +112,7 @@
                 
                 // 4. Initialize the WebSocket and Peer Connection
                 initializeWebSocket(room);
-                initializePeerConnection();
 
-                // 5. Add the local tracks to the peer connection
-                // This tells WebRTC what data to send to the other peer.
-                localStream.getTracks().forEach(track => {
-                    pc.addTrack(track, localStream);
-                });
 
                 joinButton.disabled = true;
 
@@ -135,13 +129,19 @@
         function initializeWebSocket(room) {
             const url = `${SIGNALING_SERVER_URL}?room=${room}`;
             ws = new WebSocket(url);
-
             ws.onopen = () => {
                 console.log("Connected to signaling server!");
+                initializePeerConnection();
+                // 5. Add the local tracks to the peer connection
+                // This tells WebRTC what data to send to the other peer.
+                localStream.getTracks().forEach(track => {
+                    pc.addTrack(track, localStream);
+                });
             };
 
             // This is the main message handler
             ws.onmessage = (event) => {
+                console.log("RAW MESSAGE RECEIVED:", event.data);
                 const msg = JSON.parse(event.data);
 
                 // We route the message based on its 'type'
@@ -192,6 +192,14 @@
                 }
             };
 
+            pc.onconnectionstatechange = () => {
+                console.log("Connection state:", pc.connectionState);
+                if (pc.connectionState === "connected") {
+                    console.log("Peers connected!");
+                }
+            };
+
+
             // This event fires when the *other* user adds their video/audio stream
             pc.ontrack = (event) => {
                 console.log("Received remote track!");
@@ -204,6 +212,11 @@
             pc.onnegotiationneeded = async () => {
                 try {
                     console.log("Creating offer...");
+                    if (pc.signalingState !== "stable") 
+                    {
+                        console.log("signalingState not stable");
+                        return;
+                    }
                     const offer = await pc.createOffer();
                     await pc.setLocalDescription(offer);
 
